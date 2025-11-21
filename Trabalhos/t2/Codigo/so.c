@@ -61,6 +61,8 @@ typedef struct {
   int dev_in;
   int dev_out;
   int espera_pid;
+  int waiting_dev; /* dispositivo que está aguardando (ou -1) */
+  int waiting_op;  /* 0 = none, 1 = read, 2 = write */
 } proc_t;
 
 // tabela de processos
@@ -83,6 +85,8 @@ static void init_proc_table(void)
     proc_table[i].dev_in = -1;
     proc_table[i].dev_out = -1;
     proc_table[i].espera_pid = -1;
+    proc_table[i].waiting_dev = -1;
+    proc_table[i].waiting_op = 0;
   }
   proc_corrente_slot = -1;
 }
@@ -201,12 +205,58 @@ static void so_salva_estado_da_cpu(so_t *self)
 
 static void so_trata_pendencias(so_t *self)
 {
-  // t2: realiza ações que não são diretamente ligadas com a interrupção que
-  //   está sendo atendida:
-  // - E/S pendente
-  // - desbloqueio de processos
-  // - contabilidades
-  // - etc
+  // trata operações pendentes (E/S) de processos bloqueados
+  // percorre a tabela procurando processos bloqueados e tenta completar
+  // a operação se o dispositivo estiver pronto; em caso afirmativo,
+  // realiza a E/S, limpa a pendência e marca o processo PRONTO.
+  for (int i = 0; i < MAX_PROC; i++) {
+    if (proc_table[i].state != PROC_BLOQUEADO) continue;
+    int dev = proc_table[i].waiting_dev;
+    int op = proc_table[i].waiting_op;
+    if (dev == -1 || op == 0) continue;
+
+    if (op == 1) { /* leitura pendente */
+      int estado;
+      if (es_le(self->es, dev + TERM_TECLADO_OK, &estado) != ERR_OK) {
+        console_printf("SO: erro ao verificar estado do dispositivo %d", dev);
+        self->erro_interno = true;
+        continue;
+      }
+      if (estado != 0) {
+        int dado;
+        if (es_le(self->es, dev + TERM_TECLADO, &dado) != ERR_OK) {
+          console_printf("SO: erro na leitura do dispositivo %d", dev);
+          self->erro_interno = true;
+          continue;
+        }
+        proc_table[i].A = dado;
+        proc_table[i].waiting_dev = -1;
+        proc_table[i].waiting_op = 0;
+        proc_table[i].state = PROC_PRONTO;
+        console_printf("SO: processo pid=%d desbloqueado (leitura), dado=%d", proc_table[i].pid, dado);
+      }
+
+    } else if (op == 2) { /* escrita pendente */
+      int estado;
+      if (es_le(self->es, dev + TERM_TELA_OK, &estado) != ERR_OK) {
+        console_printf("SO: erro ao verificar estado do dispositivo %d", dev);
+        self->erro_interno = true;
+        continue;
+      }
+      if (estado != 0) {
+        if (es_escreve(self->es, dev + TERM_TELA, proc_table[i].X) != ERR_OK) {
+          console_printf("SO: erro na escrita do dispositivo %d", dev);
+          self->erro_interno = true;
+          continue;
+        }
+        proc_table[i].A = 0;
+        proc_table[i].waiting_dev = -1;
+        proc_table[i].waiting_op = 0;
+        proc_table[i].state = PROC_PRONTO;
+        console_printf("SO: processo pid=%d desbloqueado (escrita)", proc_table[i].pid);
+      }
+    }
+  }
 }
 
 static void so_escalona(so_t *self)
@@ -456,32 +506,37 @@ static void so_chamada_le(so_t *self)
   if (proc_corrente_slot != -1 && proc_table[proc_corrente_slot].dev_in != -1) {
     dev_in = proc_table[proc_corrente_slot].dev_in;
   }
-
-  for (;;) {  // espera ocupada!
-    int estado;
-    if (es_le(self->es, dev_in + TERM_TECLADO_OK, &estado) != ERR_OK) {
-      console_printf("SO: problema no acesso ao estado do teclado");
-      self->erro_interno = true;
-      return;
-    }
-    if (estado != 0) break;
-    // como não está saindo do SO, a unidade de controle não está executando seu laço.
-    // esta gambiarra faz pelo menos a console ser atualizada
-    // t2: com a implementação de bloqueio de processo, esta gambiarra não
-    //   deve mais existir.
-    console_tictac(self->console);
+  /* verifica uma vez se o dispositivo está pronto; se não, bloqueia o processo */
+  int estado;
+  if (es_le(self->es, dev_in + TERM_TECLADO_OK, &estado) != ERR_OK) {
+    console_printf("SO: problema no acesso ao estado do teclado");
+    self->erro_interno = true;
+    return;
   }
+
+  if (estado == 0) {
+    /* bloqueia o processo atual aguardando leitura do dispositivo */
+    if (proc_corrente_slot != -1) {
+      proc_table[proc_corrente_slot].state = PROC_BLOQUEADO;
+      proc_table[proc_corrente_slot].waiting_dev = dev_in;
+      proc_table[proc_corrente_slot].waiting_op = 1;
+    }
+    return;
+  }
+
+  /* dispositivo pronto: faz a leitura imediatamente */
   int dado;
   if (es_le(self->es, dev_in + TERM_TECLADO, &dado) != ERR_OK) {
     console_printf("SO: problema no acesso ao teclado");
     self->erro_interno = true;
     return;
   }
-  // escreve no reg A do processador
-  // (na verdade, na posição onde o processador vai pegar o A quando retornar da int)
-  // t2: se houvesse processo, deveria escrever no reg A do processo
-  // t2: o acesso só deve ser feito nesse momento se for possível; se não, o processo
-  //   é bloqueado, e o acesso só deve ser feito mais tarde (e o processo desbloqueado)
+  /* atualiza o descritor do processo corrente com o valor lido */
+  if (proc_corrente_slot != -1) {
+    proc_table[proc_corrente_slot].A = dado;
+    proc_table[proc_corrente_slot].waiting_dev = -1;
+    proc_table[proc_corrente_slot].waiting_op = 0;
+  }
   self->regA = dado;
 }
 
@@ -499,30 +554,37 @@ static void so_chamada_escr(so_t *self)
     dev_out = proc_table[proc_corrente_slot].dev_out;
   }
 
-  for (;;) {
-    int estado;
-    if (es_le(self->es, dev_out + TERM_TELA_OK, &estado) != ERR_OK) {
-      console_printf("SO: problema no acesso ao estado da tela");
-      self->erro_interno = true;
-      return;
-    }
-    if (estado != 0) break;
-    // como não está saindo do SO, a unidade de controle não está executando seu laço.
-    // esta gambiarra faz pelo menos a console ser atualizada
-    // t2: não deve mais existir quando houver suporte a processos, porque o SO não poderá
-    //   executar por muito tempo, permitindo a execução do laço da unidade de controle
-    console_tictac(self->console);
+  /* verifica uma vez se a tela está pronta; se não, bloqueia o processo */
+  int estado_out;
+  if (es_le(self->es, dev_out + TERM_TELA_OK, &estado_out) != ERR_OK) {
+    console_printf("SO: problema no acesso ao estado da tela");
+    self->erro_interno = true;
+    return;
   }
-  int dado;
-  // está lendo o valor de X e escrevendo o de A direto onde o processador colocou/vai pegar
-  // t2: deveria usar os registradores do processo que está realizando a E/S
-  // t2: caso o processo tenha sido bloqueado, esse acesso deve ser realizado em outra execução
-  //   do SO, quando ele verificar que esse acesso já pode ser feito.
-  dado = self->regX;
+
+  if (estado_out == 0) {
+    /* bloqueia o processo atual aguardando escrita no dispositivo */
+    if (proc_corrente_slot != -1) {
+      proc_table[proc_corrente_slot].state = PROC_BLOQUEADO;
+      proc_table[proc_corrente_slot].waiting_dev = dev_out;
+      proc_table[proc_corrente_slot].waiting_op = 2; /* write */
+      /* garante que o valor a ser escrito está no descritor (X) */
+      proc_table[proc_corrente_slot].X = self->regX;
+    }
+    return;
+  }
+
+  /* dispositivo pronto: realiza a escrita */
+  int dado = self->regX;
   if (es_escreve(self->es, dev_out + TERM_TELA, dado) != ERR_OK) {
     console_printf("SO: problema no acesso à tela");
     self->erro_interno = true;
     return;
+  }
+  if (proc_corrente_slot != -1) {
+    proc_table[proc_corrente_slot].A = 0;
+    proc_table[proc_corrente_slot].waiting_dev = -1;
+    proc_table[proc_corrente_slot].waiting_op = 0;
   }
   self->regA = 0;
 }
@@ -613,16 +675,27 @@ static void so_chamada_mata_proc(so_t *self)
     }
   }
 
-  // marca como morto e libera o slot
+  // marca como morto; NÃO zera o pid imediatamente (mantemos o pid para
+  // que waiters possam encontrá-lo). Liberar o slot pode ser feito mais
+  // tarde quando o slot for reutilizado por outro processo.
   proc_table[slot].state = PROC_MORTO;
-  proc_table[slot].pid = 0;
   proc_table[slot].A = 0;
   proc_table[slot].X = 0;
   proc_table[slot].PC = 0;
   proc_table[slot].ERRO = 0;
   proc_table[slot].dev_in = -1;
   proc_table[slot].dev_out = -1;
-  proc_table[slot].espera_pid = -1;
+
+  // acorda quaisquer processos que estavam esperando por este pid
+  int pid_morto = proc_table[slot].pid;
+  for (int j = 0; j < MAX_PROC; j++) {
+    if (proc_table[j].state == PROC_BLOQUEADO && proc_table[j].espera_pid == pid_morto) {
+      proc_table[j].espera_pid = -1;
+      proc_table[j].state = PROC_PRONTO;
+      proc_table[j].A = 0; /* retorno de sucesso para quem esperava */
+      console_printf("SO: acordando pid=%d que esperava pid=%d", proc_table[j].pid, pid_morto);
+    }
+  }
 
   if (slot == proc_corrente_slot) {
     proc_corrente_slot = -1;
@@ -635,10 +708,40 @@ static void so_chamada_mata_proc(so_t *self)
 // espera o fim do processo com pid X
 static void so_chamada_espera_proc(so_t *self)
 {
-  // t2: deveria bloquear o processo se for o caso (e desbloquear na morte do esperado)
-  // ainda sem suporte a processos, retorna erro -1
-  console_printf("SO: SO_ESPERA_PROC não implementada");
-  self->regA = -1;
+  int pid = self->regX; // pid to wait for
+  if (proc_corrente_slot == -1) {
+    self->regA = -1;
+    return;
+  }
+  int caller = proc_corrente_slot;
+  // não pode esperar por si mesmo
+  if (pid == proc_table[caller].pid || pid == 0) {
+    self->regA = -1;
+    return;
+  }
+  // procura o processo com pid
+  int target_slot = -1;
+  for (int i = 0; i < MAX_PROC; i++) {
+    if (proc_table[i].pid == pid && proc_table[i].state != PROC_VAZIO) {
+      target_slot = i;
+      break;
+    }
+  }
+  if (target_slot == -1) {
+    // processo inexistente
+    self->regA = -1;
+    return;
+  }
+  // se o processo já está morto, retorna sucesso imediatamente
+  if (proc_table[target_slot].state == PROC_MORTO) {
+    self->regA = 0;
+    return;
+  }
+  // bloqueia o chamador até que o processo com pid termine
+  proc_table[caller].state = PROC_BLOQUEADO;
+  proc_table[caller].espera_pid = pid;
+  // o retorno será fornecido quando o processo alvo morrer (so_chamada_mata_proc)
+  return;
 }
 
 
