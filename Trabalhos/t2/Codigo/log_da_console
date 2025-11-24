@@ -1,0 +1,122 @@
+CMD: 'c'
+SO: recebi IRQ 0 (Reset)
+SO: carga de 'trata_int.maq' em 60-72
+SO: carga de 'init.maq' em 100-270
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 7
+SO: carga de 'p1.maq' em 7000-7241
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 7
+SO: carga de 'p2.maq' em 8000-8243
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 7
+SO: carga de 'p3.maq' em 9000-9241
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 9
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 9
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 9
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 2 (Chamada de sistema)
+SO: chamada de sistema 2
+SO: recebi IRQ 3 (E/S: relógio)
+SO: interrupção do relógio (não tratada)
+SO: recebi IRQ 2 (Chamada de sistema)
