@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdio.h> // para printf das métricas
 
 
 // ---------------------------------------------------------------------
@@ -24,6 +25,33 @@
 
 // intervalo entre interrupções do relógio
 #define INTERVALO_INTERRUPCAO 50   // em instruções executadas
+#define QUANTUM 5
+
+// Métricas
+typedef struct {
+  int pid;
+  int tempo_criacao;
+  int tempo_termino;
+  int preempcoes;
+  int vezes_pronto;
+  int vezes_executando;
+  int vezes_bloqueado;
+  int tempo_pronto;
+  int tempo_executando;
+  int tempo_bloqueado;
+  int soma_tempo_resposta;
+  int conta_tempo_resposta;
+} metrica_proc_t;
+
+#define MAX_METRICAS 100
+static metrica_proc_t metricas_proc[MAX_METRICAS];
+static int num_metricas = 0;
+
+static int relogio_sistema = 0;
+static int tempo_ocioso = 0;
+static int total_preempcoes = 0;
+static int total_processos_criados = 0;
+static int cont_interrupcoes[8]; // IRQ_RESET=0 ... IRQ_RELOGIO=3 ...
 
 struct so_t {
   cpu_t *cpu;
@@ -33,7 +61,7 @@ struct so_t {
   bool erro_interno;
 
   int regA, regX, regPC, regERRO; // cópia do estado da CPU
-  // t2: tabela de processos, processo corrente, pendências, etc
+  int contador_quantum;
 };
 
 
@@ -50,6 +78,15 @@ typedef enum {
   PROC_MORTO
 } proc_state_t;
 
+// Modos de escalonamento
+typedef enum {
+  ESCALONA_PRIORIDADE,
+  ESCALONA_ROUND_ROBIN
+} escalonamento_t;
+
+// Variável para escolher o modo de escalonamento (padrão: PRIORIDADE)
+static escalonamento_t modo_escalonamento = ESCALONA_ROUND_ROBIN;
+
 // estrutura processo
 typedef struct {
   int pid;
@@ -61,8 +98,14 @@ typedef struct {
   int dev_in;
   int dev_out;
   int espera_pid;
-  int waiting_dev; /* dispositivo que está aguardando (ou -1) */
-  int waiting_op;  /* 0 = none, 1 = read, 2 = write */
+  int waiting_dev;   // dispositivo que está aguardando (ou -1)
+  int waiting_op;    // 0 = none, 1 = read, 2 = write
+  double prioridade;
+  
+  // campos para métricas
+  int id_metrica;
+  int timestamp_estado; // tick do relógio quando entrou no estado atual
+  int timestamp_pronto; // tick do relógio quando entrou em PRONTO
 } proc_t;
 
 // tabela de processos
@@ -71,6 +114,46 @@ static proc_t proc_table[MAX_PROC];
 static int proc_corrente_slot = -1;
 // próximo pid a ser atribuído (init já tem pid 1)
 static int next_pid = 2;
+
+// função auxiliar para mudança de estado e coleta de métricas
+static void so_muda_estado(int slot, proc_state_t novo_estado) {
+  if (slot < 0 || slot >= MAX_PROC) return;
+  proc_t *p = &proc_table[slot];
+  proc_state_t anterior = p->state;
+  
+  if (anterior == novo_estado) return;
+
+  // Contabiliza tempo no estado anterior
+  int delta = relogio_sistema - p->timestamp_estado;
+  if (delta < 0) delta = 0; 
+  
+  int id = p->id_metrica;
+  if (id >= 0 && id < MAX_METRICAS) {
+    if (anterior == PROC_PRONTO) metricas_proc[id].tempo_pronto += delta;
+    else if (anterior == PROC_EXECUTANDO) metricas_proc[id].tempo_executando += delta;
+    else if (anterior == PROC_BLOQUEADO) metricas_proc[id].tempo_bloqueado += delta;
+    
+    // Contabiliza entrada no novo estado
+    if (novo_estado == PROC_PRONTO) metricas_proc[id].vezes_pronto++;
+    else if (novo_estado == PROC_EXECUTANDO) metricas_proc[id].vezes_executando++;
+    else if (novo_estado == PROC_BLOQUEADO) metricas_proc[id].vezes_bloqueado++;
+    
+    // Tempo de resposta (PRONTO -> EXECUTANDO)
+    if (anterior == PROC_PRONTO && novo_estado == PROC_EXECUTANDO) {
+      int resp = relogio_sistema - p->timestamp_pronto;
+      metricas_proc[id].soma_tempo_resposta += resp;
+      metricas_proc[id].conta_tempo_resposta++;
+    }
+    
+    // Marca entrada em PRONTO para cálculo futuro de resposta
+    if (novo_estado == PROC_PRONTO) {
+      p->timestamp_pronto = relogio_sistema;
+    }
+  }
+  
+  p->state = novo_estado;
+  p->timestamp_estado = relogio_sistema;
+}
 
 // inicializa a tabela de processos (marca todos os slots como vazios)
 static void init_proc_table(void)
@@ -87,6 +170,10 @@ static void init_proc_table(void)
     proc_table[i].espera_pid = -1;
     proc_table[i].waiting_dev = -1;
     proc_table[i].waiting_op = 0;
+    proc_table[i].prioridade = 0.5; // prioridade inicial
+    proc_table[i].id_metrica = -1;
+    proc_table[i].timestamp_estado = 0;
+    proc_table[i].timestamp_pronto = 0;
   }
   proc_corrente_slot = -1;
 }
@@ -117,6 +204,15 @@ so_t *so_cria(cpu_t *cpu, mem_t *mem, es_t *es, console_t *console)
   self->es = es;
   self->console = console;
   self->erro_interno = false;
+  self->contador_quantum = 0;
+
+  // inicializa métricas globais
+  relogio_sistema = 0;
+  tempo_ocioso = 0;
+  total_preempcoes = 0;
+  total_processos_criados = 0;
+  num_metricas = 0;
+  for(int i=0; i<8; i++) cont_interrupcoes[i] = 0;
 
   /* inicializa tabela de processos */
   init_proc_table();
@@ -145,6 +241,7 @@ static void so_trata_irq(so_t *self, int irq);
 static void so_trata_pendencias(so_t *self);
 static void so_escalona(so_t *self);
 static int so_despacha(so_t *self);
+static void so_atualiza_prioridade(so_t *self, int slot); // recalcula prioridade
 
 // função a ser chamada pela CPU quando executa a instrução CHAMAC, no tratador de
 //   interrupção em assembly
@@ -164,8 +261,10 @@ static int so_trata_interrupcao(void *argC, int reg_A)
 {
   so_t *self = argC;
   irq_t irq = reg_A;
-  // esse print polui bastante, recomendo tirar quando estiver com mais confiança
-  console_printf("SO: recebi IRQ %d (%s)", irq, irq_nome(irq));
+  
+  // contabiliza interrupção
+  if (irq >= 0 && irq < 8) cont_interrupcoes[irq]++;
+  
   // salva o estado da cpu no descritor do processo que foi interrompido
   so_salva_estado_da_cpu(self);
   // faz o atendimento da interrupção
@@ -215,7 +314,7 @@ static void so_trata_pendencias(so_t *self)
     int op = proc_table[i].waiting_op;
     if (dev == -1 || op == 0) continue;
 
-    if (op == 1) { /* leitura pendente */
+    if (op == 1) { // leitura pendente
       int estado;
       if (es_le(self->es, dev + TERM_TECLADO_OK, &estado) != ERR_OK) {
         console_printf("SO: erro ao verificar estado do dispositivo %d", dev);
@@ -232,11 +331,11 @@ static void so_trata_pendencias(so_t *self)
         proc_table[i].A = dado;
         proc_table[i].waiting_dev = -1;
         proc_table[i].waiting_op = 0;
-        proc_table[i].state = PROC_PRONTO;
+        so_muda_estado(i, PROC_PRONTO);
         console_printf("SO: processo pid=%d desbloqueado (leitura), dado=%d", proc_table[i].pid, dado);
       }
 
-    } else if (op == 2) { /* escrita pendente */
+    } else if (op == 2) { // escrita pendente
       int estado;
       if (es_le(self->es, dev + TERM_TELA_OK, &estado) != ERR_OK) {
         console_printf("SO: erro ao verificar estado do dispositivo %d", dev);
@@ -252,38 +351,74 @@ static void so_trata_pendencias(so_t *self)
         proc_table[i].A = 0;
         proc_table[i].waiting_dev = -1;
         proc_table[i].waiting_op = 0;
-        proc_table[i].state = PROC_PRONTO;
+        so_muda_estado(i, PROC_PRONTO);
         console_printf("SO: processo pid=%d desbloqueado (escrita)", proc_table[i].pid);
       }
     }
   }
 }
 
+static void so_atualiza_prioridade(so_t *self, int slot)
+{
+  if (slot == -1) return;
+  double t_exec = QUANTUM - self->contador_quantum;
+  // garante que não seja negativo ou maior que quantum por algum erro
+  if (t_exec < 0) t_exec = 0;
+  if (t_exec > QUANTUM) t_exec = QUANTUM;
+  
+  double uso = t_exec / (double)QUANTUM;
+  proc_table[slot].prioridade = (proc_table[slot].prioridade + uso) / 2.0;
+}
+
 static void so_escalona(so_t *self)
 {
-  // - se processo corrente  pronto/executando, continus
-  // - senão, escolhe o primeiro processo na tabela que esteja PRONTO
-  // - nenhum pronto, proc_corrente_slot = -1
-
+  // se o processo corrente ainda está executando, continua com ele
   if (proc_corrente_slot != -1) {
     proc_state_t st = proc_table[proc_corrente_slot].state;
-    if (st == PROC_PRONTO || st == PROC_EXECUTANDO) {
-      proc_table[proc_corrente_slot].state = PROC_EXECUTANDO;
+    if (st == PROC_EXECUTANDO) {
       return;
     }
   }
 
-  // procura o primeiro processo pronto
-  for (int i = 0; i < MAX_PROC; i++) {
-    if (proc_table[i].state == PROC_PRONTO) {
-      proc_corrente_slot = i;
-      proc_table[i].state = PROC_EXECUTANDO;
-      return;
+  int escolhido = -1;
+
+  if (modo_escalonamento == ESCALONA_PRIORIDADE) {
+    // escalonador com prioridade
+    // escolhe o processo pronto com a menor prioridade (menor valor = maior prioridade)
+    double melhor_prio = 1000000.0; // valor alto inicial
+
+    for (int i = 0; i < MAX_PROC; i++) {
+      if (proc_table[i].state == PROC_PRONTO) {
+        if (escolhido == -1 || proc_table[i].prioridade < melhor_prio) {
+          escolhido = i;
+          melhor_prio = proc_table[i].prioridade;
+        }
+      }
+    }
+  } else {
+    // escalonador round-robin
+    // escolhe o próximo processo pronto na tabela, circularmente
+    int inicio = (proc_corrente_slot + 1) % MAX_PROC;
+    // Se proc_corrente_slot for -1, inicio será 0.
+    if (inicio < 0) inicio = 0;
+
+    for (int i = 0; i < MAX_PROC; i++) {
+      int idx = (inicio + i) % MAX_PROC;
+      if (proc_table[idx].state == PROC_PRONTO) {
+        escolhido = idx;
+        break;
+      }
     }
   }
-
-  // nenhum processo pronto encontrado
-  proc_corrente_slot = -1;
+  
+  if (escolhido != -1) {
+    proc_corrente_slot = escolhido;
+    so_muda_estado(escolhido, PROC_EXECUTANDO);
+    self->contador_quantum = QUANTUM; // reinicia o quantum
+  } else {
+    // nenhum processo pronto
+    proc_corrente_slot = -1;
+  }
 }
 
 static int so_despacha(so_t *self)
@@ -392,7 +527,28 @@ static void so_trata_reset(so_t *self)
   // cria o descritor do primeiro processo (init) e inicializa a tabela
   int slot = 0;
   proc_table[slot].pid = 1;
-  proc_table[slot].state = PROC_PRONTO;
+  // inicializa métrica do init
+  if (num_metricas < MAX_METRICAS) {
+    int id = num_metricas++;
+    metricas_proc[id].pid = 1;
+    metricas_proc[id].tempo_criacao = relogio_sistema;
+    metricas_proc[id].preempcoes = 0;
+    metricas_proc[id].vezes_pronto = 1; // já nasce pronto
+    metricas_proc[id].vezes_executando = 0;
+    metricas_proc[id].vezes_bloqueado = 0;
+    metricas_proc[id].tempo_pronto = 0;
+    metricas_proc[id].tempo_executando = 0;
+    metricas_proc[id].tempo_bloqueado = 0;
+    metricas_proc[id].soma_tempo_resposta = 0;
+    metricas_proc[id].conta_tempo_resposta = 0;
+    proc_table[slot].id_metrica = id;
+    total_processos_criados++;
+  }
+  
+  proc_table[slot].state = PROC_PRONTO; // usa direto pois so_muda_estado usa timestamp anterior
+  proc_table[slot].timestamp_estado = relogio_sistema;
+  proc_table[slot].timestamp_pronto = relogio_sistema;
+  
   proc_table[slot].PC = ender;
   proc_table[slot].A = 0;
   proc_table[slot].X = 0;
@@ -400,12 +556,9 @@ static void so_trata_reset(so_t *self)
   proc_table[slot].dev_in = D_TERM_A;
   proc_table[slot].dev_out = D_TERM_A;
   proc_table[slot].espera_pid = -1;
-  proc_corrente_slot = slot;
-
-  self->regA = proc_table[slot].A;
-  self->regPC = proc_table[slot].PC;
-  self->regERRO = proc_table[slot].ERRO;
-  self->regX = proc_table[slot].X;
+  
+  // insere init na fila de prontos e deixa o escalonador escolher
+  proc_corrente_slot = -1;
 }
 
 // interrupção gerada quando a CPU identifica um erro
@@ -434,10 +587,36 @@ static void so_trata_irq_relogio(so_t *self)
     console_printf("SO: problema da reinicialização do timer");
     self->erro_interno = true;
   }
-  // t2: deveria tratar a interrupção
-  //   por exemplo, decrementa o quantum do processo corrente, quando se tem
-  //   um escalonador com quantum
-  console_printf("SO: interrupção do relógio (não tratada)");
+
+  // contabiliza tempo do sistema
+  relogio_sistema++;
+
+  // t3: contabiliza tempo ocioso se não houver processo executando
+  if (proc_corrente_slot == -1) {
+    tempo_ocioso++;
+  }
+  
+  // quantum
+  if (proc_corrente_slot != -1) {
+    self->contador_quantum--;
+    if (self->contador_quantum <= 0) {
+      // preempção
+      so_atualiza_prioridade(self, proc_corrente_slot); // recalcula prioridade
+      
+      // contabiliza preempção
+      total_preempcoes++;
+      int id = proc_table[proc_corrente_slot].id_metrica;
+      if (id >= 0 && id < MAX_METRICAS) {
+        metricas_proc[id].preempcoes++;
+      }
+
+      // muda estado usando a função auxiliar para contabilizar métricas
+      so_muda_estado(proc_corrente_slot, PROC_PRONTO);
+      
+      // O escalonador será chamado em seguida no so_trata_interrupcao
+      proc_corrente_slot = -1; // força escolha de novo processo
+    }
+  }
 }
 
 // foi gerada uma interrupção para a qual o SO não está preparado
@@ -464,7 +643,6 @@ static void so_trata_irq_chamada_sistema(so_t *self)
   // a identificação da chamada está no registrador A
   // t2: com processos, o reg A deve estar no descritor do processo corrente
   int id_chamada = self->regA;
-  console_printf("SO: chamada de sistema %d", id_chamada);
   switch (id_chamada) {
     case SO_LE:
       so_chamada_le(self);
@@ -517,7 +695,8 @@ static void so_chamada_le(so_t *self)
   if (estado == 0) {
     /* bloqueia o processo atual aguardando leitura do dispositivo */
     if (proc_corrente_slot != -1) {
-      proc_table[proc_corrente_slot].state = PROC_BLOQUEADO;
+      so_atualiza_prioridade(self, proc_corrente_slot); // recalcula prioridade antes de bloquear
+      so_muda_estado(proc_corrente_slot, PROC_BLOQUEADO);
       proc_table[proc_corrente_slot].waiting_dev = dev_in;
       proc_table[proc_corrente_slot].waiting_op = 1;
     }
@@ -565,7 +744,8 @@ static void so_chamada_escr(so_t *self)
   if (estado_out == 0) {
     /* bloqueia o processo atual aguardando escrita no dispositivo */
     if (proc_corrente_slot != -1) {
-      proc_table[proc_corrente_slot].state = PROC_BLOQUEADO;
+      so_atualiza_prioridade(self, proc_corrente_slot); // recalcula prioridade antes de bloquear
+      so_muda_estado(proc_corrente_slot, PROC_BLOQUEADO);
       proc_table[proc_corrente_slot].waiting_dev = dev_out;
       proc_table[proc_corrente_slot].waiting_op = 2; /* write */
       /* garante que o valor a ser escrito está no descritor (X) */
@@ -628,24 +808,50 @@ static void so_chamada_cria_proc(so_t *self)
   // atribui pid e inicializa o descritor
   int pid = next_pid++;
   proc_table[slot].pid = pid;
-  proc_table[slot].state = PROC_PRONTO;
+  
+  // inicializa métrica
+  if (num_metricas < MAX_METRICAS) {
+    int id = num_metricas++;
+    metricas_proc[id].pid = pid;
+    metricas_proc[id].tempo_criacao = relogio_sistema;
+    metricas_proc[id].preempcoes = 0;
+    metricas_proc[id].vezes_pronto = 1; // já nasce pronto
+    metricas_proc[id].vezes_executando = 0;
+    metricas_proc[id].vezes_bloqueado = 0;
+    metricas_proc[id].tempo_pronto = 0;
+    metricas_proc[id].tempo_executando = 0;
+    metricas_proc[id].tempo_bloqueado = 0;
+    metricas_proc[id].soma_tempo_resposta = 0;
+    metricas_proc[id].conta_tempo_resposta = 0;
+    proc_table[slot].id_metrica = id;
+    total_processos_criados++;
+  } else {
+    proc_table[slot].id_metrica = -1;
+  }
+
+  proc_table[slot].state = PROC_PRONTO; // usa direto
+  proc_table[slot].timestamp_estado = relogio_sistema;
+  proc_table[slot].timestamp_pronto = relogio_sistema;
+  
   proc_table[slot].PC = ender_carga;
   proc_table[slot].A = 0;
   proc_table[slot].X = 0;
   proc_table[slot].ERRO = 0;
-  // herda dispositivos do processo chamador, se houver
-  if (proc_corrente_slot != -1) {
-    proc_table[slot].dev_in = proc_table[proc_corrente_slot].dev_in;
-    proc_table[slot].dev_out = proc_table[proc_corrente_slot].dev_out;
-  } else {
-    proc_table[slot].dev_in = D_TERM_A;
-    proc_table[slot].dev_out = D_TERM_A;
-  }
+  // atribui terminal exclusivo baseado no pid (não herda)
+  int term_index = (pid - 1) % 4; // pid=1 -> 0 (A), pid=2 -> 1 (B), pid=3 -> 2 (C), pid=4 -> 3 (D), pid=5 -> 0 (A), etc.
+  proc_table[slot].dev_in = D_TERM_A + term_index * 4;
+  proc_table[slot].dev_out = D_TERM_A + term_index * 4;
   proc_table[slot].espera_pid = -1;
+  proc_table[slot].prioridade = 0.5; // t3: prioridade inicial
 
   // retorna o pid no registrador A do processo chamador
   self->regA = pid;
+  if (proc_corrente_slot != -1) {
+    proc_table[proc_corrente_slot].A = pid;
+  }
 }
+
+static void so_imprime_metricas(so_t *self);
 
 // implementação da chamada se sistema SO_MATA_PROC
 // mata o processo com pid X (ou o processo corrente se X é 0)
@@ -671,14 +877,23 @@ static void so_chamada_mata_proc(so_t *self)
     if (slot == -1) {
       // pid inexistente
       self->regA = -1;
+      if (proc_corrente_slot != -1) proc_table[proc_corrente_slot].A = -1;
       return;
     }
   }
 
-  // marca como morto; NÃO zera o pid imediatamente (mantemos o pid para
-  // que waiters possam encontrá-lo). Liberar o slot pode ser feito mais
-  // tarde quando o slot for reutilizado por outro processo.
-  proc_table[slot].state = PROC_MORTO;
+  // finaliza métrica
+  int id = proc_table[slot].id_metrica;
+  if (id >= 0 && id < MAX_METRICAS) {
+    metricas_proc[id].tempo_termino = relogio_sistema;
+    // Atualiza tempo final no estado EXECUTANDO (se for ele mesmo morrendo)
+    // Se for outro processo matando, ele pode estar em outro estado.
+    // so_muda_estado vai contabilizar o tempo no estado atual antes de mudar para MORTO
+  }
+  
+  // marca como morto
+  so_muda_estado(slot, PROC_MORTO);
+  
   proc_table[slot].A = 0;
   proc_table[slot].X = 0;
   proc_table[slot].PC = 0;
@@ -691,17 +906,63 @@ static void so_chamada_mata_proc(so_t *self)
   for (int j = 0; j < MAX_PROC; j++) {
     if (proc_table[j].state == PROC_BLOQUEADO && proc_table[j].espera_pid == pid_morto) {
       proc_table[j].espera_pid = -1;
-      proc_table[j].state = PROC_PRONTO;
-      proc_table[j].A = 0; /* retorno de sucesso para quem esperava */
+      so_muda_estado(j, PROC_PRONTO);
+      proc_table[j].A = 0;
       console_printf("SO: acordando pid=%d que esperava pid=%d", proc_table[j].pid, pid_morto);
     }
   }
 
   if (slot == proc_corrente_slot) {
     proc_corrente_slot = -1;
+  } else {
+    // se matou outro processo, retorna sucesso para o chamador
+    self->regA = 0;
+    if (proc_corrente_slot != -1) proc_table[proc_corrente_slot].A = 0;
+  }
+  
+  // se init morreu, imprime métricas
+  if (pid_morto == 1) {
+	so_imprime_metricas(self);
   }
 
-  self->regA = 0; // sucesso
+  self->regA = 0; // sucesso (caso geral, mas se morreu não importa)
+}
+
+static void so_imprime_metricas(so_t *self) {
+  // lê o tempo real de execução do simulador em ms a partir do dispositivo de relógio
+  int tempo_real_ms = 0;
+  if (es_le(self->es, D_RELOGIO_REAL, &tempo_real_ms) != ERR_OK) {
+    tempo_real_ms = -1; // indica erro de leitura
+  }
+
+  printf("\r\n=== METRICAS DO SISTEMA ===\r\n");
+  printf("Processos criados: %d\r\n", total_processos_criados);
+  printf("Tempo total de execucao (ticks): %d\r\n", relogio_sistema);
+  if (tempo_real_ms >= 0) {
+    printf("Tempo total de execucao real: %d ms (%.3f s)\r\n", tempo_real_ms, tempo_real_ms / 1000.0);
+  }
+  printf("Tempo ocioso: %d ticks\r\n", tempo_ocioso);
+  printf("Total de preempcoes: %d\r\n", total_preempcoes);
+  printf("Interrupcoes: RESET=%d, SIS=%d, ERR=%d, REL=%d\r\n", 
+         cont_interrupcoes[IRQ_RESET], cont_interrupcoes[IRQ_SISTEMA], 
+         cont_interrupcoes[IRQ_ERR_CPU], cont_interrupcoes[IRQ_RELOGIO]);
+	
+  printf("\r\n--- Metricas por Processo ---\r\n");
+  printf("PID | Retorno | Preemp | Prnt(n/t) | Exec(n/t) | Bloq(n/t) | Resp(med)\r\n");
+  for (int i = 0; i < num_metricas; i++) {
+    metrica_proc_t *m = &metricas_proc[i];
+    int retorno = m->tempo_termino - m->tempo_criacao;
+    double resp_media = m->conta_tempo_resposta > 0 ? 
+                        (double)m->soma_tempo_resposta / m->conta_tempo_resposta : 0.0;
+	  
+    printf("%3d | %7d | %6d | %2d/%5d | %2d/%5d | %2d/%5d | %8.2f\r\n",
+           m->pid, retorno, m->preempcoes,
+           m->vezes_pronto, m->tempo_pronto,
+           m->vezes_executando, m->tempo_executando,
+           m->vezes_bloqueado, m->tempo_bloqueado,
+           resp_media);
+  }
+  printf("===========================\r\n");
 }
 
 // implementação da chamada se sistema SO_ESPERA_PROC
@@ -717,6 +978,7 @@ static void so_chamada_espera_proc(so_t *self)
   // não pode esperar por si mesmo
   if (pid == proc_table[caller].pid || pid == 0) {
     self->regA = -1;
+    proc_table[caller].A = -1;
     return;
   }
   // procura o processo com pid
@@ -730,15 +992,18 @@ static void so_chamada_espera_proc(so_t *self)
   if (target_slot == -1) {
     // processo inexistente
     self->regA = -1;
+    proc_table[caller].A = -1;
     return;
   }
   // se o processo já está morto, retorna sucesso imediatamente
   if (proc_table[target_slot].state == PROC_MORTO) {
     self->regA = 0;
+    proc_table[caller].A = 0;
     return;
   }
   // bloqueia o chamador até que o processo com pid termine
-  proc_table[caller].state = PROC_BLOQUEADO;
+  so_atualiza_prioridade(self, caller); // recalcula prioridade antes de bloquear
+  so_muda_estado(caller, PROC_BLOQUEADO);
   proc_table[caller].espera_pid = pid;
   // o retorno será fornecido quando o processo alvo morrer (so_chamada_mata_proc)
   return;
