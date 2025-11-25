@@ -51,7 +51,7 @@ static int relogio_sistema = 0;
 static int tempo_ocioso = 0;
 static int total_preempcoes = 0;
 static int total_processos_criados = 0;
-static int cont_interrupcoes[8]; // IRQ_RESET=0 ... IRQ_RELOGIO=3 ...
+static int cont_interrupcoes[8];
 
 struct so_t {
   cpu_t *cpu;
@@ -63,8 +63,6 @@ struct so_t {
   int regA, regX, regPC, regERRO; // cópia do estado da CPU
   int contador_quantum;
 };
-
-
 
 // número máximo de procs
 #define MAX_PROC 32
@@ -214,7 +212,7 @@ so_t *so_cria(cpu_t *cpu, mem_t *mem, es_t *es, console_t *console)
   num_metricas = 0;
   for(int i=0; i<8; i++) cont_interrupcoes[i] = 0;
 
-  /* inicializa tabela de processos */
+  // inicializa tabela de processos
   init_proc_table();
 
   // quando a CPU executar uma instrução CHAMAC, deve chamar a função
@@ -293,7 +291,7 @@ static void so_salva_estado_da_cpu(so_t *self)
     return;
   }
 
-  /* se houver um processo corrente, salva os registradores no seu descritor */
+  // se houver um processo corrente, salva os registradores no seu descritor
   if (proc_corrente_slot != -1) {
     proc_table[proc_corrente_slot].A = self->regA;
     proc_table[proc_corrente_slot].PC = self->regPC;
@@ -432,8 +430,8 @@ static int so_despacha(so_t *self)
     return 1;
   }
 
-  /* coloca no buffer do SO os registradores do processo corrente antes de
-     escrever na memória onde o tratador em asm espera encontrá-los */
+  // coloca no buffer do SO os registradores do processo corrente antes de
+  // escrever na memória onde o tratador em asm espera encontrá-los
   self->regA = proc_table[proc_corrente_slot].A;
   self->regPC = proc_table[proc_corrente_slot].PC;
   self->regERRO = proc_table[proc_corrente_slot].ERRO;
@@ -679,12 +677,12 @@ static void so_chamada_le(so_t *self)
   //     o caso
   // implementação lendo direto do terminal A
   //   t2: deveria usar dispositivo de entrada corrente do processo
-  /* determina o dispositivo de entrada do processo corrente */
+  // determina o dispositivo de entrada do processo corrente
   int dev_in = D_TERM_A;
   if (proc_corrente_slot != -1 && proc_table[proc_corrente_slot].dev_in != -1) {
     dev_in = proc_table[proc_corrente_slot].dev_in;
   }
-  /* verifica uma vez se o dispositivo está pronto; se não, bloqueia o processo */
+  // verifica uma vez se o dispositivo está pronto; se não, bloqueia o processo
   int estado;
   if (es_le(self->es, dev_in + TERM_TECLADO_OK, &estado) != ERR_OK) {
     console_printf("SO: problema no acesso ao estado do teclado");
@@ -693,7 +691,7 @@ static void so_chamada_le(so_t *self)
   }
 
   if (estado == 0) {
-    /* bloqueia o processo atual aguardando leitura do dispositivo */
+    // bloqueia o processo atual aguardando leitura do dispositivo
     if (proc_corrente_slot != -1) {
       so_atualiza_prioridade(self, proc_corrente_slot); // recalcula prioridade antes de bloquear
       so_muda_estado(proc_corrente_slot, PROC_BLOQUEADO);
@@ -703,14 +701,14 @@ static void so_chamada_le(so_t *self)
     return;
   }
 
-  /* dispositivo pronto: faz a leitura imediatamente */
+  // dispositivo pronto: faz a leitura imediatamente
   int dado;
   if (es_le(self->es, dev_in + TERM_TECLADO, &dado) != ERR_OK) {
     console_printf("SO: problema no acesso ao teclado");
     self->erro_interno = true;
     return;
   }
-  /* atualiza o descritor do processo corrente com o valor lido */
+  // atualiza o descritor do processo corrente com o valor lido
   if (proc_corrente_slot != -1) {
     proc_table[proc_corrente_slot].A = dado;
     proc_table[proc_corrente_slot].waiting_dev = -1;
@@ -727,13 +725,13 @@ static void so_chamada_escr(so_t *self)
   //   t2: deveria bloquear o processo se dispositivo ocupado
   // implementação escrevendo direto do terminal A
   //   t2: deveria usar o dispositivo de saída corrente do processo
-  /* determina o dispositivo de saída do processo corrente */
+  // determina o dispositivo de saída do processo corrente
   int dev_out = D_TERM_A;
   if (proc_corrente_slot != -1 && proc_table[proc_corrente_slot].dev_out != -1) {
     dev_out = proc_table[proc_corrente_slot].dev_out;
   }
 
-  /* verifica uma vez se a tela está pronta; se não, bloqueia o processo */
+  // verifica uma vez se a tela está pronta; se não, bloqueia o processo
   int estado_out;
   if (es_le(self->es, dev_out + TERM_TELA_OK, &estado_out) != ERR_OK) {
     console_printf("SO: problema no acesso ao estado da tela");
@@ -742,19 +740,19 @@ static void so_chamada_escr(so_t *self)
   }
 
   if (estado_out == 0) {
-    /* bloqueia o processo atual aguardando escrita no dispositivo */
+    // bloqueia o processo atual aguardando escrita no dispositivo
     if (proc_corrente_slot != -1) {
       so_atualiza_prioridade(self, proc_corrente_slot); // recalcula prioridade antes de bloquear
       so_muda_estado(proc_corrente_slot, PROC_BLOQUEADO);
       proc_table[proc_corrente_slot].waiting_dev = dev_out;
-      proc_table[proc_corrente_slot].waiting_op = 2; /* write */
-      /* garante que o valor a ser escrito está no descritor (X) */
+      proc_table[proc_corrente_slot].waiting_op = 2; // write
+      // garante que o valor a ser escrito está no descritor (X)
       proc_table[proc_corrente_slot].X = self->regX;
     }
     return;
   }
 
-  /* dispositivo pronto: realiza a escrita */
+  // dispositivo pronto: realiza a escrita
   int dado = self->regX;
   if (es_escreve(self->es, dev_out + TERM_TELA, dado) != ERR_OK) {
     console_printf("SO: problema no acesso à tela");
